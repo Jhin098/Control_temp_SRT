@@ -1,0 +1,9 @@
+__pycache__/
+.venv/
+Temperature.spec
+build/
+build/
+dist/
+dist/
+*.spec
+Temperature.spec
