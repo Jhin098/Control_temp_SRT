@@ -403,7 +403,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.manual_relay_timer = None  # QTimer for manual relay activation
         self.countdown_timer = None  # QTimer for countdown display
         self.countdown_seconds = 0  # Countdown seconds remaining
-        self.runtime_timer = None  # QTimer for runtime display
+
         self.flash_timer = None  # QTimer for button flashing effect
         self.flash_state = False  # Track flash state (on/off)
         self.status_flash_timer = None  # QTimer for status label flashing
@@ -414,7 +414,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         from collections import deque
         self.data = deque()
-        self.max_window_secs = 7 * 24 * 60 * 60
+        self.max_window_secs = 5 * self.PAGE_WIDTH_SEC  # keep last 5 pages (~58 min)
+        self._last_graph_update = 0  # throttle graph redraw to 1 FPS
 
         self.start_time = time.time()
         self.max_page_index_seen = 0
@@ -446,11 +447,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.emg_sequence_signal.connect(self.serial_thread.request_emergency_sequence)
             self.full_reset_signal.connect(self.serial_thread.request_full_reset)
             self.serial_thread.start()
-            
-            # Start runtime display timer (updates xlabel every second)
-            self.runtime_timer = QtCore.QTimer()
-            self.runtime_timer.timeout.connect(self._update_runtime_display)
-            self.runtime_timer.start(1000)  # Update every 1 second
+
 
     # --------------------------------------------------
     # Build UI
@@ -757,7 +754,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self.emg_manual_lock:
             self._append_graph_data(t_sec, temp_adj)
-            self.update_graph()
+            now = time.time()
+            if (now - self._last_graph_update) >= 0.2:
+                self._last_graph_update = now
+                self.update_graph()
             return
 
         # AUTO EMERGENCY
@@ -850,7 +850,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # append graph data
         self._append_graph_data(t_sec, temp_adj)
-        self.update_graph()
+        # Throttle graph redraw to max 1 FPS to reduce CPU load
+        now = time.time()
+        if (now - self._last_graph_update) >= 0.2:
+            self._last_graph_update = now
+            self.update_graph()
 
     def _auto_countdown_tick(self):
         """UI countdown for auto emergency display only (Arduino handles actual timing)"""
@@ -890,19 +894,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_page_combo()
 
     def _refresh_page_combo(self):
+        """Rebuild combo with only pages that still have data (last 5 pages)."""
         current_page = self.current_page_index()
+        min_page = int(self.data[0][0] // self.PAGE_WIDTH_SEC) if self.data else 0
 
         self.page_combo.blockSignals(True)
         self.page_combo.clear()
         self.page_combo.addItem("Realtime (Current)", -1)
-        for i in range(self.max_page_index_seen + 1):
+        for i in range(min_page, self.max_page_index_seen + 1):
             start = int(i * self.PAGE_WIDTH_SEC)
             end = int((i + 1) * self.PAGE_WIDTH_SEC)
             self.page_combo.addItem(f"Page {i} ({start}–{end} s)", i)
-        if current_page == -1:
+        if current_page == -1 or current_page < min_page:
             self.page_combo.setCurrentIndex(0)
         else:
-            self.page_combo.setCurrentIndex(current_page + 1)
+            idx = current_page - min_page + 1  # +1 for "Realtime" entry
+            if idx < self.page_combo.count():
+                self.page_combo.setCurrentIndex(idx)
+            else:
+                self.page_combo.setCurrentIndex(0)
         self.page_combo.blockSignals(False)
 
     def current_page_index(self) -> int:
@@ -936,14 +946,7 @@ class MainWindow(QtWidgets.QMainWindow):
             xs_rel = [x - start for x in xs]
             self.curve_line.set_data(xs_rel, ys)
 
-        # fixed axes
-        self.ax.set_xlim(0, 750)
-        self.ax.set_ylim(0, 500)
-
         self.lbl_page_range.setText(f"Page {page_idx} ({int(start)}–{int(end)} s)")
-
-        self.ax.set_xticks(list(range(0, 751, 100)))
-        self.ax.set_yticks(list(range(0, 501, 100)))
         
         # Update xlabel with runtime
         runtime = int(time.time() - self.start_time)
@@ -1024,11 +1027,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.btn_reset.setText("⏹ Reset ")
     
-    def _update_runtime_display(self):
-        """Update xlabel with total runtime in seconds"""
-        runtime = int(time.time() - self.start_time)
-        self.ax.set_xlabel(f"Seconds: {runtime}", fontsize=10, color="black")
-        self.canvas.draw_idle()
     
     def _flash_button(self):
         """Flash EMG MANUAL button between red colors for danger warning"""
